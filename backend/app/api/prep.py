@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.models import KitchenOrder
 from app.services.bom_engine import LedgerSplitError
 from app.services import prep_service
+
 router = APIRouter(prefix="/prep", tags=["prep"])
 
 @router.post("/run")
@@ -19,6 +21,10 @@ def run_prep(order_id: int = 1, db: Session = Depends(get_db)):
     except LedgerSplitError as e:
         # 注意：这是拆账失败，不是结存不够
         raise HTTPException(409, f"两本账拆法对不上，整次失败，主贴/专册/占用列已全部退回：{e}")
+    except IntegrityError as e:
+        # 并发/约束冲突：本事务已整体退回，没有半套账落下
+        db.rollback()
+        raise HTTPException(409, f"落库冲突，主贴/专册/占用列已全部退回，请重读该订单已落库的一套账：{e.orig}")
 
 @router.get("/latest")
 def latest(order_id: int = 1, db: Session = Depends(get_db)):

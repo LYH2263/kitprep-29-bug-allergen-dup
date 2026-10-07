@@ -38,8 +38,6 @@ onMounted(async () => {
 })
 </script>
 <template>
-  <!-- dualBookHint: main+allergen may both list same row -->
-
   <h1>备料工作台</h1>
   <p class="sub">左 BOM 树 · 中主贴+敏料专册 · 右主缺料贴 · 顶栏订单芯片</p>
   <div class="kp-chips" style="margin-bottom:0.75rem" v-if="orders.length">

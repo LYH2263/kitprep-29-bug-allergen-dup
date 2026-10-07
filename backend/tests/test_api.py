@@ -95,6 +95,14 @@ def test_change_marker_after_commit_does_not_rewrite_old_run(client):
     # 旧单不变；但新试算(latest 只读)按新标记拆，提示未落库的那一套长什么样
     again = client.post("/api/prep/run?order_id=1").json()
     assert again["id"] == first["id"] and again["allergen_lines"] == []
+    # 旧主贴行逐字钉死：油仍在主贴、行上含敏标记不许被库存页勾选翻过来
+    old_oil = next(l for l in again["prep_lines"] if l["ingredient_code"] == "I2")
+    assert old_oil["is_allergen"] is False
+    # 台账行也没搬家：油仍是 main 册一行，allergen 册为空
+    db = next(app.dependency_overrides[get_db]())
+    rows = db.query(PrepLedgerEntry).filter(PrepLedgerEntry.ingredient_id == oil_id).all()
+    assert len(rows) == 1 and rows[0].book == "main" and rows[0].is_allergen is False
+    db.close()
 
 
 def test_latest_before_generation_is_preview_and_shortages_empty(client):
@@ -117,6 +125,33 @@ def test_split_conflict_returns_409_not_shortage_and_persists_nothing(client, mo
     assert "退回" in res.json()["detail"] and "结存" not in res.json()["detail"]
 
     db = next(app.dependency_overrides[get_db]())
+    assert db.query(PrepLedgerEntry).count() == 0
+    assert db.query(OrderPrepCommitment).count() == 0
+    db.close()
+
+
+def test_non_race_integrity_error_returns_409_and_persists_nothing(client, monkeypatch):
+    from app.services import prep_service
+    from sqlalchemy.exc import IntegrityError
+
+    def boom(*a, **k):
+        raise IntegrityError("statement", {}, Exception("其他唯一约束冲突"))
+
+    # 服务层读不到赢家旧账时不吞异常，交给 API 层映射成 409
+    monkeypatch.setattr(prep_service, "get_committed", lambda *a, **k: None)
+    orig = app.dependency_overrides[get_db]
+
+    def wrapped():
+        for s in orig():
+            monkeypatch.setattr(s, "commit", boom)
+            yield s
+
+    app.dependency_overrides[get_db] = wrapped
+    res = client.post("/api/prep/run?order_id=1")
+    assert res.status_code == 409 and "退回" in res.json()["detail"]
+    app.dependency_overrides[get_db] = orig
+
+    db = next(orig())
     assert db.query(PrepLedgerEntry).count() == 0
     assert db.query(OrderPrepCommitment).count() == 0
     db.close()

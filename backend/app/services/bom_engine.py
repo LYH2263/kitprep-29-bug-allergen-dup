@@ -53,17 +53,51 @@ def explode_and_merge(
     return lines
 
 def split_books(lines: list[NeedLine]) -> dict[str, list[NeedLine]]:
+    """互斥拆账：含敏行只进专册，其余只进主贴。同一行严禁两本都出现。"""
     books: dict[str, list[NeedLine]] = {MAIN_BOOK: [], ALLERGEN_BOOK: []}
     for l in lines:
-        if l.is_allergen:
-            books[ALLERGEN_BOOK].append(l)
-            books[MAIN_BOOK].append(l)
-        else:
-            books[MAIN_BOOK].append(l)
+        books[ALLERGEN_BOOK if l.is_allergen else MAIN_BOOK].append(l)
     return books
 
 def validate_books(lines: list[NeedLine], books: dict[str, list[NeedLine]]) -> None:
-    return
+    """两本账互斥且并集完备、归属正确。任何对不上都抛 LedgerSplitError：
+    - 含敏行混进主贴 / 非含敏行混进专册；
+    - 同一原料行两本都记；
+    - 需料行哪本都没落（一本落下另一本空/漏行）；
+    - 台账多出本单之外的行。
+    """
+    main = books.get(MAIN_BOOK)
+    allergen = books.get(ALLERGEN_BOOK)
+    if main is None or allergen is None:
+        raise LedgerSplitError("两本账缺册：主贴或敏料专册缺失")
+
+    main_ids = [l.ingredient_id for l in main]
+    reg_ids = [l.ingredient_id for l in allergen]
+    expected_ids = {l.ingredient_id for l in lines}
+
+    overlap = set(main_ids) & set(reg_ids)
+    if overlap:
+        codes = [l.ingredient_code for l in main + allergen if l.ingredient_id in overlap]
+        raise LedgerSplitError(f"含敏行同时记进两本账: {sorted(set(codes))}")
+    if len(main_ids) != len(set(main_ids)):
+        raise LedgerSplitError("主贴存在同一原料重复落账")
+    if len(reg_ids) != len(set(reg_ids)):
+        raise LedgerSplitError("敏料专册存在同一原料重复落账")
+
+    for l in main:
+        if l.is_allergen:
+            raise LedgerSplitError(f"含敏原料 {l.ingredient_code} 的行混进了主贴")
+    for l in allergen:
+        if not l.is_allergen:
+            raise LedgerSplitError(f"非含敏原料 {l.ingredient_code} 混进了敏料专册")
+
+    landed = set(main_ids) | set(reg_ids)
+    missing = expected_ids - landed
+    if missing:
+        raise LedgerSplitError(f"需料行未落账（两本必须一起落）: {sorted(missing)}")
+    extra = landed - expected_ids
+    if extra:
+        raise LedgerSplitError(f"台账出现本单之外的行: {sorted(extra)}")
 
 def _book_stats(book_lines: list[NeedLine]) -> dict:
     return {

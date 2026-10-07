@@ -11,6 +11,7 @@ import json
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.models import (
@@ -81,6 +82,8 @@ def _verify_persisted(db: Session, run_id: int, expected_ids: set[int], ingredie
         if r.book not in (MAIN_BOOK, ALLERGEN_BOOK):
             raise LedgerSplitError(f"原料 {r.ingredient_code} 落进了未知账册 {r.book}")
         seen[r.ingredient_id] = r
+        if r.ingredient_id not in ingredients:
+            raise LedgerSplitError(f"原料 {r.ingredient_code} 不属于本单原料主数据")
         flag_allergen = bool(ingredients[r.ingredient_id]["is_allergen"])
         if r.book == MAIN_BOOK and flag_allergen:
             raise LedgerSplitError(f"含敏原料 {r.ingredient_code} 的行混进了主贴")
@@ -156,14 +159,19 @@ def generate_prep(db: Session, order_id: int) -> dict:
         db.add(OrderPrepCommitment(order_id=order_id, prep_run_id=run.id,
                                    created_at=datetime.utcnow()))
         db.commit()
-    except Exception:
-        # 专册、主贴、占用列、承诺全部退回；
-        # 若因抢点（行锁在 SQLite 等方言无效，靠唯一承诺约束兜底）发现对方已落库，
-        # 则返回对方那一套账，保证两边只许同一套两本账。
+    except IntegrityError:
+        # 抢点兜底：订单行锁在 SQLite 等方言上不互斥，两个入口同时生成时，
+        # 靠 order_prep_commitments 的唯一约束只放进一套。输家整次回退，
+        # 改读赢家那套账原样返回 —— 两入口只许同一套两本账。
         db.rollback()
         existing = get_committed(db, order_id)
         if existing is not None:
             return existing
+        raise
+    except Exception:
+        # 拆法对不上/结存被改等：主贴、专册、占用列、承诺、运行记录全部一起退回，
+        # 两本账同成同败，绝不留半套。
+        db.rollback()
         raise
 
     return _serialize(db.get(PrepRun, run.id)) | {"generated": True, "immutable": False}

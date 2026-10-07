@@ -26,8 +26,6 @@ async function toggleAllergen(r: any) {
 onMounted(load)
 </script>
 <template>
-  <!-- dualBookHint: main+allergen may both list same row -->
-
   <h1>库存</h1>
   <p class="sub">中央厨房原料库存 · 结存为实物账，备料生成只记占用列、不扣结存</p>
   <div class="card">

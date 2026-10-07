@@ -10,8 +10,6 @@ onMounted(async () => {
 })
 </script>
 <template>
-  <!-- dualBookHint: main+allergen may both list same row -->
-
   <h1>缺料便利贴</h1>
   <p class="sub">主缺料贴：shortage = need − stock（仅主贴正数）；含敏料走专册，不算结存不够</p>
   <p v-if="!generated" class="badge badge-warn" style="margin-bottom:0.8rem">

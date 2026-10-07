@@ -134,3 +134,67 @@ def test_get_committed_is_none_before_generation(Session):
     db = Session()
     assert prep_service.get_committed(db, 1) is None
     db.close()
+
+
+def test_marker_toggle_after_commit_freezes_json_and_ledger_rows(Session):
+    db = Session()
+    first = prep_service.generate_prep(db, 1)
+    run_id = first["id"]
+    assert first["allergen_lines"] == []
+
+    # 库存页改勾选：只允许动 ingredients.is_allergen
+    oil = db.scalar(select(Ingredient).where(Ingredient.code == "I2"))
+    oil.is_allergen = True
+    db.commit()
+
+    # 旧单 result_json 逐字钉死：主贴仍 2 行、专册仍空、行上标记不跟着翻
+    import json
+    frozen = json.loads(db.get(PrepRun, run_id).result_json)
+    assert {l["ingredient_code"] for l in frozen["prep_lines"]} == {"I1", "I2"}
+    assert frozen["allergen_lines"] == []
+    assert all(l["is_allergen"] is False for l in frozen["prep_lines"])
+
+    # 台账行同样钉死：没有行搬家、book 列不变
+    rows = db.scalars(select(PrepLedgerEntry).where(PrepLedgerEntry.prep_run_id == run_id)).all()
+    assert {r.book for r in rows} == {"main"}
+    assert {r.ingredient_code for r in rows} == {"I1", "I2"}
+    assert all(r.is_allergen is False for r in rows)
+
+    # 再点生成拿到的还是这套旧账
+    again = prep_service.generate_prep(db, 1)
+    assert again["id"] == run_id and again["immutable"] is True
+    assert again["allergen_lines"] == []
+    db.close()
+
+
+def test_race_unique_violation_loser_returns_winners_ledger(Session, monkeypatch):
+    # 赢家已提交一套；输家进门时查无旧账（对方尚未提交），提交承诺时撞唯一约束
+    db1 = Session()
+    first = prep_service.generate_prep(db1, 1)
+
+    db2 = Session()
+    from sqlalchemy.exc import IntegrityError
+    real_get = prep_service.get_committed
+    calls = {"n": 0}
+
+    def fake_get(db, oid):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else real_get(db, oid)
+
+    monkeypatch.setattr(prep_service, "get_committed", fake_get)
+
+    def race_commit(*a, **k):
+        db2.rollback()
+        raise IntegrityError(
+            "insert into order_prep_commitments", {},
+            Exception("UNIQUE constraint failed: order_prep_commitments.order_id"),
+        )
+
+    monkeypatch.setattr(db2, "commit", race_commit)
+    second = prep_service.generate_prep(db2, 1)
+
+    # 输家整次退回后原样返回赢家的那套两本账，不产生第二套
+    assert second["id"] == first["id"] and second["immutable"] is True
+    assert _count(db2, PrepRun) == 1
+    assert _count(db2, OrderPrepCommitment) == 1
+    db1.close(); db2.close()

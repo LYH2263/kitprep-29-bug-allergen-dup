@@ -32,17 +32,8 @@ def patch_allergen(ingredient_id: int, body: AllergenPatch, db: Session = Depend
     if not ing:
         raise HTTPException(404, "原料不存在")
     ing.is_allergen = body.is_allergen
-    from app.models.models import PrepRun
-    import json as _json
-    for run in db.scalars(select(PrepRun)).all():
-        data = _json.loads(run.result_json)
-        for line in data.get("prep_lines", []):
-            if line.get("ingredient_id") == ingredient_id:
-                line["is_allergen"] = body.is_allergen
-        for line in data.get("allergen_lines", []) or []:
-            if line.get("ingredient_id") == ingredient_id:
-                line["is_allergen"] = body.is_allergen
-        run.result_json = _json.dumps(data, ensure_ascii=False)
+    # 已落下的旧单（PrepRun.result_json 与 prep_ledger_entries）按当时标记钉死，
+    # 绝不回写改字；新标记只影响之后新生成的单。
     db.commit()
     return {"id": ing.id, "code": ing.code, "name": ing.name, "unit": ing.unit,
             "stock_qty": ing.stock_qty, "is_allergen": ing.is_allergen}
