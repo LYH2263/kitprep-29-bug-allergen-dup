@@ -68,12 +68,15 @@ def preview_prep(db: Session, order_id: int) -> dict:
     result["id"] = None
     return result
 
-def _verify_persisted(db: Session, run_id: int, expected_ids: set[int], ingredients: dict[int, dict]) -> None:
-    """提交前独立重查：落库的主贴/专册/占用列必须与含敏标记拆法完全对得上。
-    不依赖调用方传入的拆账结果，防止一本落漏、两本都记或含敏行混进主贴。"""
+def _verify_persisted(db: Session, run_id: int, expected_ids: set[int]) -> None:
+    """提交前独立重查：落库的主贴/专册/占用列必须与数据库当前含敏标记拆法完全对得上。
+    不依赖调用方传入的拆账结果或缓存标记，防止一本落漏、两本都记或含敏行混进主贴。"""
     rows = db.scalars(
         select(PrepLedgerEntry).where(PrepLedgerEntry.prep_run_id == run_id)
     ).all()
+    # 当前标记直接回表取，不用生成开始时的缓存（中途被改则本次拆法作废、整次回退）
+    flags = {i.id: bool(i.is_allergen)
+             for i in db.scalars(select(Ingredient)).all()}
     seen: dict[int, PrepLedgerEntry] = {}
     for r in rows:
         if r.ingredient_id in seen:
@@ -81,12 +84,12 @@ def _verify_persisted(db: Session, run_id: int, expected_ids: set[int], ingredie
         if r.book not in (MAIN_BOOK, ALLERGEN_BOOK):
             raise LedgerSplitError(f"原料 {r.ingredient_code} 落进了未知账册 {r.book}")
         seen[r.ingredient_id] = r
-        flag_allergen = bool(ingredients[r.ingredient_id]["is_allergen"])
+        flag_allergen = flags[r.ingredient_id]
         if r.book == MAIN_BOOK and flag_allergen:
             raise LedgerSplitError(f"含敏原料 {r.ingredient_code} 的行混进了主贴")
         if r.book == ALLERGEN_BOOK and not flag_allergen:
             raise LedgerSplitError(f"非含敏原料 {r.ingredient_code} 混进了敏料专册")
-        if r.is_allergen != flag_allergen:
+        if bool(r.is_allergen) != flag_allergen:
             raise LedgerSplitError(f"原料 {r.ingredient_code} 含敏标记与专册归属不一致")
         # 占用列必须随两本账一起落下，且只记账不扣结存
         if r.occupied_qty != r.need_qty:
@@ -144,7 +147,7 @@ def generate_prep(db: Session, order_id: int) -> dict:
         # 两本账作为一个整体处理（专册无含敏时允许为空列表，但事务不允许只落一半）
         db.flush()
         run_id = run.id
-        _verify_persisted(db, run_id, {l.ingredient_id for l in lines}, ings)
+        _verify_persisted(db, run_id, {l.ingredient_id for l in lines})
 
         # 结存保护：生成前后 stock_qty 必须逐字一致，禁止当扣账
         db.flush()

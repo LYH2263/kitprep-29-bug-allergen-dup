@@ -53,17 +53,47 @@ def explode_and_merge(
     return lines
 
 def split_books(lines: list[NeedLine]) -> dict[str, list[NeedLine]]:
+    """含敏行只进敏料专册，其余行只进主贴：一本恰好一次，禁止双落。"""
     books: dict[str, list[NeedLine]] = {MAIN_BOOK: [], ALLERGEN_BOOK: []}
     for l in lines:
-        if l.is_allergen:
-            books[ALLERGEN_BOOK].append(l)
-            books[MAIN_BOOK].append(l)
-        else:
-            books[MAIN_BOOK].append(l)
+        books[ALLERGEN_BOOK if l.is_allergen else MAIN_BOOK].append(l)
     return books
 
 def validate_books(lines: list[NeedLine], books: dict[str, list[NeedLine]]) -> None:
-    return
+    """落库前核对两本账：
+    - 每行恰好进一本（含敏进专册、普通进主贴），禁止两本都记或哪本都不进；
+    - 两本互斥（同一原料不得两边都在）且并集恰好覆盖全部需料行；
+    - 账册归属与行上 is_allergen 标记一致。
+    对不上即抛 LedgerSplitError，由事务整次回退。"""
+    main = books.get(MAIN_BOOK)
+    allergen = books.get(ALLERGEN_BOOK)
+    if main is None or allergen is None:
+        raise LedgerSplitError("两本账缺本：主贴或敏料专册缺失")
+
+    bad_main = [l for l in main if l.is_allergen]
+    if bad_main:
+        codes = sorted({l.ingredient_code for l in bad_main})
+        raise LedgerSplitError(f"含敏行混进主贴（含敏只许进专册）: {codes}")
+    bad_reg = [l for l in allergen if not l.is_allergen]
+    if bad_reg:
+        codes = sorted({l.ingredient_code for l in bad_reg})
+        raise LedgerSplitError(f"非含敏行混进敏料专册: {codes}")
+
+    main_ids = [l.ingredient_id for l in main]
+    reg_ids = [l.ingredient_id for l in allergen]
+    if len(main_ids) != len(set(main_ids)) or len(reg_ids) != len(set(reg_ids)):
+        raise LedgerSplitError("同一原料在一本账内重复落账")
+    overlap = set(main_ids) & set(reg_ids)
+    if overlap:
+        raise LedgerSplitError(f"同一需料行两本都记（必须只进一本）: {sorted(overlap)}")
+    expected = {l.ingredient_id for l in lines}
+    got = set(main_ids) | set(reg_ids)
+    missing = expected - got
+    extra = got - expected
+    if missing:
+        raise LedgerSplitError(f"需料行漏落（两本必须一起成）: {sorted(missing)}")
+    if extra:
+        raise LedgerSplitError(f"台账出现本单之外的行: {sorted(extra)}")
 
 def _book_stats(book_lines: list[NeedLine]) -> dict:
     return {

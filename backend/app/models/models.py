@@ -66,6 +66,8 @@ class PrepLedgerEntry(Base):
     __tablename__ = "prep_ledger_entries"
     __table_args__ = (
         UniqueConstraint("prep_run_id", "book", "ingredient_id", name="uq_ledger_run_book_ingredient"),
+        # 库级铁规：同一 run 同一原料只许落一行，从库层掐死"含敏行两本都记"
+        UniqueConstraint("prep_run_id", "ingredient_id", name="uq_ledger_run_ingredient"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     prep_run_id: Mapped[int] = mapped_column(ForeignKey("prep_runs.id"), nullable=False)

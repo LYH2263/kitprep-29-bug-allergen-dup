@@ -27,22 +27,12 @@ def list_inventory(db: Session = Depends(get_db)):
 
 @router.patch("/{ingredient_id}")
 def patch_allergen(ingredient_id: int, body: AllergenPatch, db: Session = Depends(get_db)):
-    """库存页保存含敏标记。改标记只影响之后新生成的单；已落库的旧单禁止改字。"""
+    """库存页保存含敏标记。改标记只影响之后新生成的单；
+    已落库旧单的快照（prep_runs.result_json）与台账行一律钉死，禁止回改字。"""
     ing = db.get(Ingredient, ingredient_id)
     if not ing:
         raise HTTPException(404, "原料不存在")
     ing.is_allergen = body.is_allergen
-    from app.models.models import PrepRun
-    import json as _json
-    for run in db.scalars(select(PrepRun)).all():
-        data = _json.loads(run.result_json)
-        for line in data.get("prep_lines", []):
-            if line.get("ingredient_id") == ingredient_id:
-                line["is_allergen"] = body.is_allergen
-        for line in data.get("allergen_lines", []) or []:
-            if line.get("ingredient_id") == ingredient_id:
-                line["is_allergen"] = body.is_allergen
-        run.result_json = _json.dumps(data, ensure_ascii=False)
     db.commit()
     return {"id": ing.id, "code": ing.code, "name": ing.name, "unit": ing.unit,
             "stock_qty": ing.stock_qty, "is_allergen": ing.is_allergen}

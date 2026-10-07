@@ -32,7 +32,7 @@ onMounted(async () => {
 })
 </script>
 <template>
-  <!-- dualBookHint: main+allergen may both list same row -->
+  <!-- dualBookRule: 两入口共用同一套互斥两本账 -->
 
   <h1>订单芯片</h1>
   <p class="sub">门店要货 · 在此生成与备料台共用同一套主贴+专册账</p>

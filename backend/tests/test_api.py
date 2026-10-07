@@ -95,6 +95,17 @@ def test_change_marker_after_commit_does_not_rewrite_old_run(client):
     # 旧单不变；但新试算(latest 只读)按新标记拆，提示未落库的那一套长什么样
     again = client.post("/api/prep/run?order_id=1").json()
     assert again["id"] == first["id"] and again["allergen_lines"] == []
+    # 钉死到行：I2 必须还在主贴，且行内 is_allergen 快照仍是落库时的 False，
+    # 不许只留个旧分册壳子、行内字却被库存页勾改带走
+    old = client.get("/api/prep/latest?order_id=1").json()
+    main_codes = {l["ingredient_code"]: l for l in old["prep_lines"]}
+    assert set(main_codes) == {"I1", "I2"}
+    assert main_codes["I2"]["is_allergen"] is False
+
+    db = next(app.dependency_overrides[get_db]())
+    led = db.scalars(select(PrepLedgerEntry).where(PrepLedgerEntry.ingredient_id == oil_id)).all()
+    assert len(led) == 1 and led[0].book == "main" and led[0].is_allergen is False
+    db.close()
 
 
 def test_latest_before_generation_is_preview_and_shortages_empty(client):

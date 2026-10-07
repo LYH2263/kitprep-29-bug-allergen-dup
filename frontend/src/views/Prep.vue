@@ -38,7 +38,7 @@ onMounted(async () => {
 })
 </script>
 <template>
-  <!-- dualBookHint: main+allergen may both list same row -->
+  <!-- dualBookRule: 同一行只许在一本——含敏进专册，其余进主贴，两本互斥 -->
 
   <h1>备料工作台</h1>
   <p class="sub">左 BOM 树 · 中主贴+敏料专册 · 右主缺料贴 · 顶栏订单芯片</p>

@@ -1,14 +1,77 @@
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
 
 from app.database import Base, engine
-from app.models.models import BomLine, Dish, Ingredient, KitchenOrder, OrderLine
+from app.models.models import (
+    BomLine, Dish, Ingredient, KitchenOrder, OrderLine,
+    OrderPrepCommitment, PrepLedgerEntry, PrepRun,
+)
+
+def _dedupe_legacy_double_entry(conn) -> list[int]:
+    """旧版本含敏行会双落主贴+专册。唯一索引建不上去，先按
+    “账册归属与行内 is_allergen 快照自洽”优先保留专册那行，删除重复。
+    返回被清理过的 prep_run_id，供重建旧单 JSON 快照。"""
+    affected = [r[0] for r in conn.execute(text("""
+        SELECT prep_run_id FROM prep_ledger_entries
+        GROUP BY prep_run_id, ingredient_id
+        HAVING COUNT(*) > 1
+    """)).all()]
+    if not affected:
+        return []
+    conn.execute(text("""
+        DELETE FROM prep_ledger_entries
+        WHERE id NOT IN (
+            SELECT keep.id FROM prep_ledger_entries keep
+            WHERE keep.id = (
+                SELECT e.id FROM prep_ledger_entries e
+                WHERE e.prep_run_id = keep.prep_run_id
+                  AND e.ingredient_id = keep.ingredient_id
+                ORDER BY CASE WHEN (e.book = 'allergen') = e.is_allergen
+                              THEN 0 ELSE 1 END,
+                         e.id
+                LIMIT 1
+            )
+        )
+    """))
+    return affected
+
+def _rebuild_run_snapshots(db: Session, run_ids: list[int]) -> None:
+    """去重后按台账剩行重建受影响旧单的 result_json 分册部分：
+    need/stock/shortage 等每个字保持落库时值，仅把错落在另一本的重复行抹掉。"""
+    import json
+    from app.services.bom_engine import (
+        ALLERGEN_BOOK, MAIN_BOOK, NeedLine, result_to_dict,
+    )
+    for run_id in run_ids:
+        run = db.get(PrepRun, run_id)
+        if run is None:
+            continue
+        rows = db.scalars(
+            select(PrepLedgerEntry)
+            .where(PrepLedgerEntry.prep_run_id == run_id)
+            .order_by(PrepLedgerEntry.ingredient_id)
+        ).all()
+        def _need(r: PrepLedgerEntry) -> NeedLine:
+            return NeedLine(
+                ingredient_id=r.ingredient_id, ingredient_code=r.ingredient_code,
+                ingredient_name=r.ingredient_name, unit=r.unit,
+                need_qty=r.need_qty, stock_qty=r.stock_qty, shortage=r.shortage,
+                is_allergen=bool(r.is_allergen),
+            )
+        main = [_need(r) for r in rows if r.book == MAIN_BOOK]
+        allergen = [_need(r) for r in rows if r.book == ALLERGEN_BOOK]
+        data = json.loads(run.result_json or "{}")
+        data.update(result_to_dict(main + allergen,
+                                   {MAIN_BOOK: main, ALLERGEN_BOOK: allergen}))
+        data["generated"] = True
+        run.result_json = json.dumps(data, ensure_ascii=False)
+    db.commit()
 
 def ensure_schema() -> None:
-    """建表 + 给存量 ingredients 表补 is_allergen 列（create_all 不会给旧表加列）。"""
+    """建表 + 存量库补列/补约束（create_all 不会改旧表）。"""
     Base.metadata.create_all(bind=engine)
     inspector = inspect(engine)
-    tables = inspector.get_table_names()
+    tables = set(inspector.get_table_names())
     if "ingredients" not in tables:
         return
     columns = {c["name"] for c in inspector.get_columns("ingredients")}
@@ -19,6 +82,22 @@ def ensure_schema() -> None:
             conn.execute(text(
                 f"ALTER TABLE ingredients ADD COLUMN is_allergen BOOLEAN NOT NULL DEFAULT {default_lit}"
             ))
+
+    if "prep_ledger_entries" in tables:
+        # 旧双落数据先去重，再上库级铁规：同一 run 同一原料只许一行
+        with engine.begin() as conn:
+            affected = _dedupe_legacy_double_entry(conn)
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_ledger_run_ingredient "
+                "ON prep_ledger_entries (prep_run_id, ingredient_id)"
+            ))
+        if affected:
+            from app.database import SessionLocal
+            db = SessionLocal()
+            try:
+                _rebuild_run_snapshots(db, affected)
+            finally:
+                db.close()
 
 def seed_if_empty(db: Session) -> None:
     if (db.scalar(text("SELECT count(*) FROM dishes")) or 0) > 0:
